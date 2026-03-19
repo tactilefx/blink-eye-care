@@ -1,12 +1,47 @@
 import AppKit
 import SwiftUI
+import Combine
 
-class BreakWindowController: NSObject, ObservableObject {
+// A short-lived view model that exists only for the duration of one break.
+// This avoids @ObservedObject references to long-lived singletons, which
+// cause EXC_BAD_ACCESS when NSHostingView is torn down on window.close().
+final class BreakViewModel: ObservableObject {
+    @Published var secondsRemaining: Int
+    @Published var showSkipConfirm: Bool = false
+    let message: String
+    let totalDuration: Int
+    var onSkip: () -> Void = {}
+
+    private var timerCancellable: AnyCancellable?
+
+    init(message: String, duration: Int) {
+        self.message = message
+        self.totalDuration = duration
+        self.secondsRemaining = duration
+
+        // Subscribe to the shared timer's break countdown
+        timerCancellable = TimerManager.shared.$breakSecondsRemaining
+            .receive(on: RunLoop.main)
+            .sink { [weak self] value in
+                self?.secondsRemaining = value
+            }
+    }
+
+    deinit {
+        timerCancellable?.cancel()
+    }
+
+    var progress: CGFloat {
+        guard totalDuration > 0 else { return 0 }
+        return CGFloat(secondsRemaining) / CGFloat(totalDuration)
+    }
+}
+
+class BreakWindowController: NSObject {
     static let shared = BreakWindowController()
 
-    @Published var showSkipConfirm: Bool = false
-
     private var windows: [NSWindow] = []
+    private var viewModels: [BreakViewModel] = []
     private let timerManager = TimerManager.shared
     private let settings = AppSettings.shared
     private var keyMonitor: Any?
@@ -33,13 +68,16 @@ class BreakWindowController: NSObject, ObservableObject {
     }
 
     @objc private func showBreak() {
-        showSkipConfirm = false
         confirmResetWork?.cancel()
 
         let message = settings.randomMessage()
 
         for screen in NSScreen.screens {
-            let window = createBreakWindow(for: screen, message: message)
+            let vm = BreakViewModel(message: message, duration: settings.breakDuration)
+            vm.onSkip = { [weak self] in self?.handleEscape() }
+            viewModels.append(vm)
+
+            let window = createBreakWindow(for: screen, viewModel: vm)
             windows.append(window)
 
             window.alphaValue = 0
@@ -53,16 +91,13 @@ class BreakWindowController: NSObject, ObservableObject {
 
         NSApplication.shared.activate(ignoringOtherApps: true)
 
-        // Monitor keyboard during break
         removeKeyMonitor()
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
-
-            if event.keyCode == 53 { // Escape
+            if event.keyCode == 53 {
                 self.handleEscape()
                 return nil
             }
-
             return event
         }
     }
@@ -71,10 +106,13 @@ class BreakWindowController: NSObject, ObservableObject {
         removeKeyMonitor()
         confirmResetWork?.cancel()
         confirmResetWork = nil
-        showSkipConfirm = false
 
         let windowsToClose = windows
         windows.removeAll()
+
+        // Clear view models AFTER windows are closed
+        let vmsToRelease = viewModels
+        viewModels.removeAll()
 
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.4
@@ -83,34 +121,32 @@ class BreakWindowController: NSObject, ObservableObject {
             }
         }, completionHandler: {
             for window in windowsToClose {
+                window.contentView = nil // Detach hosting view first
                 window.close()
             }
+            // vmsToRelease dealloc naturally here after closure completes
+            _ = vmsToRelease
         })
     }
 
     private func handleEscape() {
-        if showSkipConfirm {
-            // Second Escape — skip the break
-            showSkipConfirm = false
+        let isConfirming = viewModels.first?.showSkipConfirm ?? false
+
+        if isConfirming {
+            for vm in viewModels { vm.showSkipConfirm = false }
             confirmResetWork?.cancel()
             timerManager.endBreakEarly()
         } else {
-            // First Escape — show confirmation
-            showSkipConfirm = true
+            for vm in viewModels { vm.showSkipConfirm = true }
 
-            // Reset confirmation after 3 seconds
             confirmResetWork?.cancel()
             let work = DispatchWorkItem { [weak self] in
-                self?.showSkipConfirm = false
+                guard let self = self else { return }
+                for vm in self.viewModels { vm.showSkipConfirm = false }
             }
             confirmResetWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
         }
-    }
-
-    /// Called from the Skip button tap
-    func skipFromButton() {
-        handleEscape()
     }
 
     private func removeKeyMonitor() {
@@ -120,12 +156,8 @@ class BreakWindowController: NSObject, ObservableObject {
         }
     }
 
-    private func createBreakWindow(for screen: NSScreen, message: String) -> NSWindow {
-        let breakView = BreakOverlayView(
-            message: message,
-            timerManager: timerManager,
-            breakController: self
-        )
+    private func createBreakWindow(for screen: NSScreen, viewModel: BreakViewModel) -> NSWindow {
+        let breakView = BreakOverlayView(viewModel: viewModel)
 
         let window = NSWindow(
             contentRect: screen.frame,
@@ -153,9 +185,7 @@ class BreakWindowController: NSObject, ObservableObject {
 }
 
 struct BreakOverlayView: View {
-    let message: String
-    @ObservedObject var timerManager: TimerManager
-    @ObservedObject var breakController: BreakWindowController
+    @ObservedObject var viewModel: BreakViewModel
 
     var body: some View {
         ZStack {
@@ -165,29 +195,27 @@ struct BreakOverlayView: View {
             VStack(spacing: 40) {
                 Spacer()
 
-                // Countdown ring
                 ZStack {
                     Circle()
                         .stroke(Color.white.opacity(0.15), lineWidth: 4)
                         .frame(width: 120, height: 120)
 
                     Circle()
-                        .trim(from: 0, to: progress)
+                        .trim(from: 0, to: viewModel.progress)
                         .stroke(
                             Color.white,
                             style: StrokeStyle(lineWidth: 4, lineCap: .round)
                         )
                         .frame(width: 120, height: 120)
                         .rotationEffect(.degrees(-90))
-                        .animation(.linear(duration: 1), value: progress)
+                        .animation(.linear(duration: 1), value: viewModel.progress)
 
-                    Text("\(timerManager.breakSecondsRemaining)")
+                    Text("\(viewModel.secondsRemaining)")
                         .font(.system(size: 40, weight: .light, design: .rounded))
                         .foregroundColor(.white)
                 }
 
-                // Motivational message
-                Text(message)
+                Text(viewModel.message)
                     .font(.system(size: 28, weight: .light, design: .rounded))
                     .foregroundColor(.white.opacity(0.9))
                     .multilineTextAlignment(.center)
@@ -196,15 +224,14 @@ struct BreakOverlayView: View {
 
                 Spacer()
 
-                // Skip button / confirmation
                 VStack(spacing: 0) {
-                    if breakController.showSkipConfirm {
+                    if viewModel.showSkipConfirm {
                         Text("Press Esc again to skip")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(.white.opacity(0.5))
                             .transition(.opacity)
                     } else {
-                        Button(action: { breakController.skipFromButton() }) {
+                        Button(action: { viewModel.onSkip() }) {
                             Text("Skip  (Esc)")
                                 .font(.system(size: 14, weight: .medium))
                                 .foregroundColor(.white.opacity(0.6))
@@ -217,15 +244,9 @@ struct BreakOverlayView: View {
                         .transition(.opacity)
                     }
                 }
-                .animation(.easeInOut(duration: 0.2), value: breakController.showSkipConfirm)
+                .animation(.easeInOut(duration: 0.2), value: viewModel.showSkipConfirm)
                 .padding(.bottom, 40)
             }
         }
-    }
-
-    private var progress: CGFloat {
-        let settings = AppSettings.shared
-        guard settings.breakDuration > 0 else { return 0 }
-        return CGFloat(timerManager.breakSecondsRemaining) / CGFloat(settings.breakDuration)
     }
 }

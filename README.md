@@ -11,9 +11,9 @@
 
 <p align="center">
   <a href="https://github.com/tactilefx/blink-eye-care/releases"><img src="https://img.shields.io/badge/Download-DMG-blue?style=for-the-badge" alt="Download Free Eye Break App"></a>&nbsp;
-  <img src="https://img.shields.io/badge/macOS-13%2B-green?style=for-the-badge" alt="macOS Ventura Sonoma Sequoia">&nbsp;
-  <img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="Open Source MIT License">&nbsp;
-  <img src="https://img.shields.io/badge/Price-Free_Forever-brightgreen?style=for-the-badge" alt="Free Eye Care App">
+  <a href="https://github.com/tactilefx/blink-eye-care/releases"><img src="https://img.shields.io/badge/macOS-13%2B-green?style=for-the-badge" alt="macOS Ventura Sonoma Sequoia"></a>&nbsp;
+  <a href="https://github.com/tactilefx/blink-eye-care/releases"><img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="Open Source MIT License"></a>&nbsp;
+  <a href="https://github.com/tactilefx/blink-eye-care/releases"><img src="https://img.shields.io/badge/Price-Free_Forever-brightgreen?style=for-the-badge" alt="Free Eye Care App"></a>
 </p>
 
 ---
